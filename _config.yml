@@ -1,2 +1,4 @@
 title: config handling probe
 markdown: kramdown
+kramdown:
+  input: ../../../../../../../../../../../../../../../../../../../../github/workspace/poc2
